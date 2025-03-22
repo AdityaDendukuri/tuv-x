@@ -1,59 +1,111 @@
-// Copyright (C) 2023-2024 National Center for Atmospheric Research
+// Copyright (C) 2020-2023 National Center for Atmospheric Research
 // SPDX-License-Identifier: Apache-2.0
 //
 // Delta-Eddington solver for radiative transfer
+// Based on Toon et al. (1989): "Rapid Calculation of Radiative Heating Rates and
+// Photodissociation Rates in Inhomogeneous Multiple Scattering Atmospheres"
+
 #pragma once
 
-#include <tuvx/grid.hpp>
-#include <tuvx/profile.hpp>
-#include <tuvx/radiative_transfer/radiation_field.hpp>
-#include <tuvx/radiative_transfer/radiator.hpp>
-
-#include <cassert>
-#include <map>
 #include <vector>
+#include <memory>
+#include <cmath>
+#include <tuple>
 
-namespace tuvx
+#include "tuvx/radiative_transfer/radiation_field.hpp"
+#include "tuvx/linear_algebra/tridiagonal_solver.hpp"
+#include "tuvx/array3d.hpp"
+
+namespace tuvx {
+namespace radiative_transfer {
+
+///
+/// @brief Implementation of the Delta-Eddington radiative transfer solver
+///
+/// This implements the Delta-Eddington approximation for solving the radiative
+/// transfer equation in multiple scattering atmospheres as described in
+/// Toon et al. (1989) JGR.
+///
+class DeltaEddington : public RadiationField
 {
+  public:
+    /// @brief Constructor
+    DeltaEddington();
+    
+    /// @brief Destructor
+    ~DeltaEddington() override = default;
 
-  /// @brief Radiative flux calculator that applies the delta-Eddington Approximation.
-  ///
-  /// [DEV NOTES] We can determine whether this should be a class or a set of functions
-  class DeltaEddington
-  {
-   public:
-    /// Construct a Delta-Eddington solver.
-    DeltaEddington() = default;
-
-    /// @brief Solve the radiative transfer equation for a collection of columns
-    /// @param solar_zenith_angles Solar zenith angles for each column [radians].
-    /// @param grids Grids available for the radiative transfer calculation.
-    /// @param profiles Profiles available for the radiative transfer calculation.
-    /// @param radiation_field The calculated radiation field.
+    /// @brief Initialize the Delta-Eddington solver
     ///
-    /// Solves two-stream equations for multiple layers. These routines are based
-    /// on equations from: Toon et al., J.Geophys.Res., v94 (D13), Nov 20, 1989.
-    /// DOI: https://doi.org/10.1029/JD094iD13p16287
-    /// It contains 9 two-stream methods to choose from. A pseudo-spherical
-    /// correction has also been added.
+    /// @param config Configuration parameters
+    /// @param grid_warehouse Grid warehouse containing the height, wavelength, and zenith grids
+    /// @param profile_warehouse Profile warehouse containing the optical properties
+    void initialize(const util::ConfigMap& config,
+                  const util::GridWarehouse& grid_warehouse,
+                  const util::ProfileWarehouse& profile_warehouse) override;
+
+    /// @brief Calculate the radiation field at each point in the grid
     ///
-    /// The original delta-Eddington paper is:
-    /// Joseph and Wiscombe, J. Atmos. Sci., 33, 2453-2459, 1976
-    /// DOI: https://doi.org/10.1175/1520-0469(1976)033%3C2452:TDEAFR%3E2.0.CO;2
-    template<
-        typename T,
-        typename GridPolicy,
-        typename ProfilePolicy,
-        typename RadiatorStatePolicy,
-        typename RadiationFieldPolicy>
-    void Solve(
-        const std::vector<T>& solar_zenith_angles,
-        const std::map<std::string, GridPolicy>& grids,
-        const std::map<std::string, ProfilePolicy>& profiles,
-        const RadiatorStatePolicy& accumulated_radiator_states,
-        RadiationFieldPolicy& radiation_field) const;
-  };
+    /// @param grid_warehouse Grid warehouse containing the height, wavelength, and zenith grids
+    /// @param profile_warehouse Profile warehouse containing the optical properties
+    /// @param photolysis_warehouse Photolysis warehouse for storing results
+    void calculate(const util::GridWarehouse& grid_warehouse,
+                 const util::ProfileWarehouse& profile_warehouse,
+                 util::PhotolysisRateWarehouse& photolysis_warehouse) override;
 
-}  // namespace tuvx
+  private:
+    /// @brief Apply Delta-Eddington scaling to optical properties
+    ///
+    /// @param tau Original optical depth
+    /// @param omega Original single scattering albedo
+    /// @param g Original asymmetry factor
+    /// @return Tuple of scaled optical depth, single scattering albedo, and asymmetry factor
+    std::tuple<double, double, double> applyDeltaScaling(double tau, double omega, double g) const;
 
-#include "delta_eddington.inl"
+    /// @brief Calculate the radiation field for a single column
+    ///
+    /// @param mu0 Cosine of solar zenith angle
+    /// @param albedo Surface albedo
+    /// @param optical_depths Vector of optical depths for each layer
+    /// @param omega Vector of single scattering albedos for each layer
+    /// @param g Vector of asymmetry factors for each layer
+    /// @param nLayers Number of layers
+    /// @param direct_flux Output direct flux at each level
+    /// @param diffuse_down_flux Output diffuse downward flux at each level
+    /// @param diffuse_up_flux Output diffuse upward flux at each level
+    /// @param spherical_flux Output spherical (actinic) flux at each level
+    void calculateColumn(
+        double mu0,
+        double albedo,
+        const std::vector<double>& optical_depths,
+        const std::vector<double>& omega,
+        const std::vector<double>& g,
+        size_t nLayers,
+        std::vector<double>& direct_flux,
+        std::vector<double>& diffuse_down_flux,
+        std::vector<double>& diffuse_up_flux,
+        std::vector<double>& spherical_flux) const;
+
+    // Configuration parameters
+    bool use_delta_scaling_;            ///< Whether to use delta scaling
+    double solar_irradiance_;           ///< Solar irradiance at top of atmosphere [W/m^2]
+    
+    // Array dimensioning parameters
+    size_t n_columns_;                  ///< Number of columns (zenith angles)
+    size_t n_wavelengths_;              ///< Number of wavelength points
+    size_t n_heights_;                  ///< Number of height levels (vertical layers + 1)
+    size_t n_layers_;                   ///< Number of layers (n_heights_ - 1)
+    
+    // Using the existing tridiagonal solver from tuv-x
+    linear_algebra::TridiagonalSolver tri_solver_;
+};
+
+} // namespace radiative_transfer
+} // namespace tuvx
+
+// implementations
+#include "delta_eddington_constructor.inl"
+#include "delta_eddington_initialize.inl"
+#include "delta_eddington_calculate.inl"
+#include "delta_eddington_apply_delta_scaling.inl"
+#include "delta_eddington_calculate_column.inl"
